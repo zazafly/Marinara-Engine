@@ -25,9 +25,18 @@ export type EchoChamberSide = "top-left" | "top-right" | "bottom-left" | "bottom
 export type UserStatus = "active" | "idle" | "dnd";
 export type RoleplayAvatarStyle = "circles" | "rectangles" | "panel";
 export type GameDialogueDisplayMode = "classic" | "stacked";
+export type SummaryPopoverSourceMode = "last" | "range";
 export interface FloatingWidgetPosition {
   x: number;
   y: number;
+}
+export interface SummaryPopoverSettings {
+  sourceMode: SummaryPopoverSourceMode;
+  contextSize: number | null;
+  rangeStart: number | null;
+  rangeEnd: number | null;
+  hideSummarisedMessages: boolean;
+  collapseHiddenMessages: boolean;
 }
 export const APP_LANGUAGE_OPTIONS = [{ id: "en", label: "English" }] as const;
 export type AppLanguage = (typeof APP_LANGUAGE_OPTIONS)[number]["id"];
@@ -79,6 +88,14 @@ const DEFAULT_GAME_SETUP_REMEMBERED_TEXT: GameSetupRememberedText = {
   playerGoals: "",
   preferences: "",
 };
+const DEFAULT_SUMMARY_POPOVER_SETTINGS: SummaryPopoverSettings = {
+  sourceMode: "last",
+  contextSize: null,
+  rangeStart: null,
+  rangeEnd: null,
+  hideSummarisedMessages: false,
+  collapseHiddenMessages: false,
+};
 
 function clampImageDimension(value: number) {
   const rounded = Number.isFinite(value) ? Math.round(value) : 0;
@@ -117,6 +134,20 @@ function normalizeTrackerPanelSectionOrder(value: unknown): TrackerPanelSectionO
   }
 
   return order;
+}
+
+function normalizeSummaryPopoverSettings(value: unknown): SummaryPopoverSettings {
+  const raw = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const numberOrNull = (next: unknown) => (typeof next === "number" && Number.isFinite(next) ? Math.round(next) : null);
+
+  return {
+    sourceMode: raw.sourceMode === "range" ? "range" : "last",
+    contextSize: numberOrNull(raw.contextSize),
+    rangeStart: numberOrNull(raw.rangeStart),
+    rangeEnd: numberOrNull(raw.rangeEnd),
+    hideSummarisedMessages: raw.hideSummarisedMessages === true,
+    collapseHiddenMessages: raw.collapseHiddenMessages === true,
+  };
 }
 
 function normalizeLearnedGameSetupOption(value: unknown) {
@@ -284,6 +315,8 @@ interface UIState {
   intuitiveSwipeRerollLatest: boolean;
   /** When true, pressing Up Arrow with an empty chat input opens the last user message for editing (Conversation/Roleplay). */
   editLastMessageOnArrowUp: boolean;
+  /** Persisted controls shown in the Chat Summary popover settings window. */
+  summaryPopoverSettings: SummaryPopoverSettings;
 
   // ── Text Appearance ──
   /** Color for narrator text in RP mode (empty = default amber) */
@@ -486,6 +519,7 @@ interface UIState {
   setIntuitiveSwipeNavigation: (v: boolean) => void;
   setIntuitiveSwipeRerollLatest: (v: boolean) => void;
   setEditLastMessageOnArrowUp: (v: boolean) => void;
+  setSummaryPopoverSettings: (settings: Partial<SummaryPopoverSettings>) => void;
   setNarrationFontColor: (v: string) => void;
   setNarrationOpacity: (v: number) => void;
   setChatFontColor: (v: string) => void;
@@ -603,6 +637,7 @@ export function pickSyncedSettings(state: UIState) {
     intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
     intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
     editLastMessageOnArrowUp: state.editLastMessageOnArrowUp,
+    summaryPopoverSettings: state.summaryPopoverSettings,
     narrationFontColor: state.narrationFontColor,
     narrationOpacity: state.narrationOpacity,
     chatFontColor: state.chatFontColor,
@@ -718,6 +753,7 @@ export const useUIStore = create<UIState>()(
       intuitiveSwipeNavigation: false,
       intuitiveSwipeRerollLatest: false,
       editLastMessageOnArrowUp: true,
+      summaryPopoverSettings: DEFAULT_SUMMARY_POPOVER_SETTINGS,
       narrationFontColor: "",
       narrationOpacity: 80,
       chatFontColor: "",
@@ -1074,6 +1110,13 @@ export const useUIStore = create<UIState>()(
       setIntuitiveSwipeNavigation: (v) => set({ intuitiveSwipeNavigation: v }),
       setIntuitiveSwipeRerollLatest: (v) => set({ intuitiveSwipeRerollLatest: v }),
       setEditLastMessageOnArrowUp: (v) => set({ editLastMessageOnArrowUp: v }),
+      setSummaryPopoverSettings: (settings) =>
+        set((state) => ({
+          summaryPopoverSettings: normalizeSummaryPopoverSettings({
+            ...state.summaryPopoverSettings,
+            ...settings,
+          }),
+        })),
       setNarrationFontColor: (v) => set({ narrationFontColor: v }),
       setNarrationOpacity: (v) => set({ narrationOpacity: Math.max(0, Math.min(100, v)) }),
       setChatFontColor: (v) => set({ chatFontColor: v }),
@@ -1174,7 +1217,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 29,
+      version: 30,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1440,6 +1483,11 @@ export const useUIStore = create<UIState>()(
           persisted.showQuickReplyGuide = false;
           persisted.showQuickReplyImpersonate = true;
         }
+        // v29 -> v30: persist Chat Summary popover source and display controls.
+        if (version <= 29) {
+          persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
+        }
+        persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
         return persisted;
       },
       partialize: (state) => ({
@@ -1496,6 +1544,8 @@ export const useUIStore = create<UIState>()(
         spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
         intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
         intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
+        editLastMessageOnArrowUp: state.editLastMessageOnArrowUp,
+        summaryPopoverSettings: state.summaryPopoverSettings,
         narrationFontColor: state.narrationFontColor,
         narrationOpacity: state.narrationOpacity,
         chatFontColor: state.chatFontColor,
