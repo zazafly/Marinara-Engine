@@ -140,6 +140,10 @@ export interface AgentContext {
   writableLorebookIds: string[] | null;
   /** Chat summary text (if any) — helps agents avoid duplicating summarized info */
   chatSummary: string | null;
+  /** Current-turn pre-generation injections, only present for agents that opt in */
+  preGenInjections?: Array<{ agentType: string; agentName?: string; text: string }>;
+  /** Current-turn parallel-phase results, only present for agents that opt in */
+  parallelResults?: AgentResult[];
   /** Whether internal agent LLM calls should use transport streaming. */
   streaming?: boolean;
   /** Abort signal — when triggered, agent execution should stop. Typed as `any` to avoid DOM/Node lib dependency. */

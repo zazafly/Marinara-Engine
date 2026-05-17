@@ -124,9 +124,9 @@ export async function executeAgent(
         ? buildExpressionAgentMessages(template, context)
         : config.type === "knowledge-retrieval"
           ? buildKnowledgeRetrievalAgentMessages(config, template, context)
-        : config.type === "spotify" && context.chatMode === "game"
-          ? buildGameSpotifyAgentMessages(template, context)
-          : buildStandardAgentMessages(config, template, context);
+          : config.type === "spotify" && context.chatMode === "game"
+            ? buildGameSpotifyAgentMessages(template, context)
+            : buildStandardAgentMessages(config, template, context);
 
     // Agents use lower temperature for reliability
     const temperature = (config.settings.temperature as number) ?? 0.3;
@@ -941,6 +941,18 @@ function buildAgentMessages(
     finalParts.push(`<assistant_response>`);
     finalParts.push(stripHtmlTags(context.mainResponse));
     finalParts.push(`</assistant_response>`);
+  }
+
+  if (context.preGenInjections?.length) {
+    finalParts.push(`\n<pre_generation_injections>`);
+    finalParts.push(JSON.stringify(context.preGenInjections));
+    finalParts.push(`</pre_generation_injections>`);
+  }
+
+  if (context.parallelResults?.length) {
+    finalParts.push(`\n<parallel_agent_results>`);
+    finalParts.push(JSON.stringify(context.parallelResults));
+    finalParts.push(`</parallel_agent_results>`);
   }
 
   if (context.memory._agentResults) {

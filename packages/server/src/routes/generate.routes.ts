@@ -7179,7 +7179,13 @@ export async function generateRoutes(app: FastifyInstance) {
         }
 
         let postResults = hasPostProcessingAgents
-          ? [...(await pipeline.postGenerate(combinedResponse)), ...parallelResults]
+          ? [
+              ...(await pipeline.postGenerate(combinedResponse, {
+                preGenInjections: contextInjections,
+                parallelResults,
+              })),
+              ...parallelResults,
+            ]
           : [...parallelResults];
 
         if (lorebookKeeperAgent) {
@@ -8431,6 +8437,9 @@ export async function generateRoutes(app: FastifyInstance) {
               const editorContext: AgentContext = {
                 ...agentContext,
                 mainResponse: currentResponseForRewrite,
+                preGenInjections:
+                  textRewriteAgent.settings.includePreGenInjections === true ? contextInjections : undefined,
+                parallelResults: textRewriteAgent.settings.includeParallelResults === true ? parallelResults : undefined,
                 memory: { ...agentContext.memory, _agentResults: agentSummary },
               };
 
