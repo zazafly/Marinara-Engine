@@ -116,9 +116,9 @@ function messageText(body: Record<string, unknown>): string {
 test("individual group generation resolves {{char}} for the selected responder", async () => {
   const providerRequests: Record<string, unknown>[] = [];
   const providerServer = createServer(async (req, res) => {
-    providerRequests.push(await readRequestBody(req));
-    const replyNumber = providerRequests.length;
-    writeChatCompletion(res, replyNumber === 1 ? "Alice replies." : "Bob replies.");
+    const body = await readRequestBody(req);
+    providerRequests.push(body);
+    writeChatCompletion(res, messageText(body).includes("Respond ONLY as Bob.") ? "Bob replies." : "Alice replies.");
   });
   const providerUrl = await new Promise<string>((resolve, reject) => {
     providerServer.once("error", reject);
@@ -405,6 +405,89 @@ test("individual group generation resolves {{char}} for the selected responder",
       assert.doesNotMatch(regenPrompt, /limited narration from Alice's perspective/);
       assert.match(regenPrompt, /LORE_NAME=Bob/);
       assert.doesNotMatch(regenPrompt, /LORE_NAME=Alice/);
+
+      await db.insert(chats).values({
+        id: "chat-character-macro-manual",
+        name: "Character macro manual repro",
+        mode: "roleplay",
+        characterIds: JSON.stringify(["char-alice", "char-bob"]),
+        promptPresetId: "preset-character-macro",
+        connectionId: "conn-character-macro",
+        metadata: JSON.stringify({
+          groupChatMode: "individual",
+          groupResponseOrder: "manual",
+        }),
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      providerRequests.length = 0;
+      const manualAliceResponse = await app.inject({
+        method: "POST",
+        url: "/api/generate/",
+        payload: {
+          chatId: "chat-character-macro-manual",
+          connectionId: "conn-character-macro",
+          userMessage: null,
+          forCharacterId: "char-alice",
+          streaming: false,
+        },
+      });
+
+      assert.equal(manualAliceResponse.statusCode, 200);
+      assert.equal(providerRequests.length, 1);
+      const manualAlicePrompt = messageText(providerRequests[0]!);
+      assert.match(manualAlicePrompt, /limited narration from Alice's perspective/);
+      assert.doesNotMatch(manualAlicePrompt, /limited narration from Bob's perspective/);
+
+      providerRequests.length = 0;
+      const manualBobResponse = await app.inject({
+        method: "POST",
+        url: "/api/generate/",
+        payload: {
+          chatId: "chat-character-macro-manual",
+          connectionId: "conn-character-macro",
+          userMessage: "Intervening user message",
+          forCharacterId: "char-bob",
+          streaming: false,
+        },
+      });
+
+      assert.equal(manualBobResponse.statusCode, 200);
+      assert.equal(providerRequests.length, 1);
+      const manualBobPrompt = messageText(providerRequests[0]!);
+      assert.match(manualBobPrompt, /Respond ONLY as Bob\./);
+      assert.match(manualBobPrompt, /limited narration from Bob's perspective/);
+      assert.doesNotMatch(manualBobPrompt, /limited narration from Alice's perspective/);
+
+      const manualMessages = await db.select().from(messages);
+      const manualBobMessage = manualMessages.find(
+        (message) =>
+          message.chatId === "chat-character-macro-manual" &&
+          message.role === "assistant" &&
+          message.characterId === "char-bob",
+      );
+      assert.ok(manualBobMessage, "expected manual Bob message to be saved");
+
+      providerRequests.length = 0;
+      const manualRegenResponse = await app.inject({
+        method: "POST",
+        url: "/api/generate/",
+        payload: {
+          chatId: "chat-character-macro-manual",
+          connectionId: "conn-character-macro",
+          userMessage: null,
+          regenerateMessageId: manualBobMessage.id,
+          streaming: false,
+        },
+      });
+
+      assert.equal(manualRegenResponse.statusCode, 200);
+      assert.equal(providerRequests.length, 1);
+      const manualRegenPrompt = messageText(providerRequests[0]!);
+      assert.match(manualRegenPrompt, /Respond ONLY as Bob\./);
+      assert.match(manualRegenPrompt, /limited narration from Bob's perspective/);
+      assert.doesNotMatch(manualRegenPrompt, /limited narration from Alice's perspective/);
     } finally {
       await app.close();
     }

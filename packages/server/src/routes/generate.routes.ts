@@ -884,16 +884,20 @@ export async function generateRoutes(app: FastifyInstance) {
       }
     };
 
+    const earlyMeta = parseExtra(chat.metadata) as Record<string, unknown>;
+
     if (input.regenerateMessageId) {
       const regenCandidate = await chats.getMessage(input.regenerateMessageId);
       if (regenCandidate?.chatId === input.chatId) {
         const replay = normalizeGenerationReplay(parseExtra(regenCandidate.extra).generationReplay);
         applyGenerationReplayToRegenerateInput(input, replay);
+        if (!input.forCharacterId && earlyMeta.groupResponseOrder === "manual" && regenCandidate.characterId) {
+          input.forCharacterId = regenCandidate.characterId;
+        }
       }
     }
 
     // ── Discord webhook URL (parsed once, used for mirroring below) ──
-    const earlyMeta = parseExtra(chat.metadata) as Record<string, unknown>;
     const discordWebhookUrl = typeof earlyMeta.discordWebhookUrl === "string" ? earlyMeta.discordWebhookUrl : "";
     let pendingUserDiscordMsg = "";
 
