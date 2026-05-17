@@ -39,6 +39,7 @@ import { useConnections } from "../../hooks/use-connections";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
+import { useSidecarStore } from "../../stores/sidecar.store";
 import {
   ArrowLeft,
   Save,
@@ -72,8 +73,15 @@ import {
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
-import type { Lorebook, LorebookEntry, LorebookFolder, LorebookCategory } from "@marinara-engine/shared";
-import { testPrimaryKeys, testSecondaryKeys } from "@marinara-engine/shared";
+import {
+  LOCAL_SIDECAR_CONNECTION_ID,
+  testPrimaryKeys,
+  testSecondaryKeys,
+  type Lorebook,
+  type LorebookEntry,
+  type LorebookFolder,
+  type LorebookCategory,
+} from "@marinara-engine/shared";
 import { LorebookEntryRow } from "./LorebookEntryRow";
 import { LorebookFolderRow } from "./LorebookFolderRow";
 import { ExpandableTextarea, estimateTokens } from "./LorebookFormFields";
@@ -1507,9 +1515,9 @@ export function LorebookEditor() {
                     <div className="space-y-2 border-t border-[var(--border)] px-3 py-3">
                       <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
                         Paste sample chat text and entries whose keys would trigger get an emerald accent and a
-                        &quot;Would activate&quot; chip. Constant entries are flagged separately because they
-                        activate regardless of text. Out of scope: timing, probability, character/persona filters,
-                        and semantic matching.
+                        &quot;Would activate&quot; chip. Constant entries are flagged separately because they activate
+                        regardless of text. Out of scope: timing, probability, character/persona filters, and semantic
+                        matching.
                       </p>
                       <div className="relative">
                         <textarea
@@ -2011,8 +2019,30 @@ export function LorebookEditor() {
 function VectorizeSection({ lorebookId, entries }: { lorebookId: string; entries: LorebookEntry[] }) {
   const queryClient = useQueryClient();
   const { data: rawConnections } = useConnections();
-  const connections = (rawConnections ?? []) as Array<{ id: string; name: string; embeddingModel?: string }>;
-  const embeddingConnections = connections.filter((c) => c.embeddingModel);
+  const sidecarModelDownloaded = useSidecarStore((s) => s.modelDownloaded);
+  const sidecarModelDisplayName = useSidecarStore((s) => s.modelDisplayName);
+  const fetchSidecarStatus = useSidecarStore((s) => s.fetchStatus);
+  const connections = useMemo(
+    () => (rawConnections ?? []) as Array<{ id: string; name: string; embeddingModel?: string }>,
+    [rawConnections],
+  );
+  const sidecarEmbeddingConnections = useMemo(() => {
+    if (import.meta.env.VITE_MARINARA_LITE === "true" || !sidecarModelDownloaded) return [];
+    return [
+      {
+        id: LOCAL_SIDECAR_CONNECTION_ID,
+        name: "Local Model (sidecar)",
+        embeddingModel: sidecarModelDisplayName ?? "local-sidecar",
+      },
+    ];
+  }, [sidecarModelDownloaded, sidecarModelDisplayName]);
+  const embeddingConnections = useMemo(
+    () => [
+      ...sidecarEmbeddingConnections,
+      ...connections.filter((c) => typeof c.embeddingModel === "string" && c.embeddingModel.trim()),
+    ],
+    [connections, sidecarEmbeddingConnections],
+  );
   const [selectedConnectionId, setSelectedConnectionId] = useState<string>("");
   const [vectorizing, setVectorizing] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -2024,6 +2054,12 @@ function VectorizeSection({ lorebookId, entries }: { lorebookId: string; entries
   ).length;
   const missingCount = Math.max(0, vectorizableEntryCount - vectorizedCount);
   const allVectorized = vectorizableEntryCount > 0 && missingCount === 0;
+
+  useEffect(() => {
+    if (import.meta.env.VITE_MARINARA_LITE !== "true") {
+      void fetchSidecarStatus();
+    }
+  }, [fetchSidecarStatus]);
 
   // Auto-select first embedding connection
   useEffect(() => {

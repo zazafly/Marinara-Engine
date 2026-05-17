@@ -12,6 +12,7 @@ import {
   updateLorebookEntrySchema,
   createLorebookFolderSchema,
   updateLorebookFolderSchema,
+  LOCAL_SIDECAR_CONNECTION_ID,
   type CreateLorebookEntryInput,
   type LorebookEntryTimingState,
   type LorebookEntry,
@@ -29,7 +30,7 @@ import {
   clearCharacterEmbeddedLorebook,
 } from "../services/lorebook/character-book-sync.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
-import type { APIProvider } from "@marinara-engine/shared";
+import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
@@ -742,13 +743,17 @@ export async function lorebooksRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>("/:id/vectorize", async (req, reply) => {
     const body = req.body as { connectionId: string; model: string; onlyMissing?: boolean };
-    if (!body.connectionId || !body.model) {
-      return reply.status(400).send({ error: "connectionId and model are required" });
+    if (!body.connectionId) {
+      return reply.status(400).send({ error: "connectionId is required" });
+    }
+    const useLocalSidecar = body.connectionId === LOCAL_SIDECAR_CONNECTION_ID;
+    if (!useLocalSidecar && !body.model) {
+      return reply.status(400).send({ error: "model is required" });
     }
 
     const connStorage = createConnectionsStorage(app.db);
-    const conn = await connStorage.getWithKey(body.connectionId);
-    if (!conn) return reply.status(404).send({ error: "Connection not found" });
+    const conn = useLocalSidecar ? null : await connStorage.getWithKey(body.connectionId);
+    if (!useLocalSidecar && !conn) return reply.status(404).send({ error: "Connection not found" });
 
     const allEntries = await storage.listEntries(req.params.id);
     if (!allEntries.length) return { vectorized: 0, total: 0, skipped: 0 };
@@ -763,18 +768,24 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       : vectorizableEntries;
     if (!entries.length) return { vectorized: 0, total: allEntries.length, skipped: allEntries.length };
 
-    // Use dedicated embedding base URL if configured, otherwise the connection's base URL
-    const embedBaseUrl = conn.embeddingBaseUrl
-      ? (conn.embeddingBaseUrl as string).replace(/\/+$/, "")
-      : (conn.baseUrl as string);
-    const provider = createLLMProvider(
-      conn.provider as string,
-      embedBaseUrl,
-      conn.apiKey as string,
-      conn.maxContext,
-      conn.openrouterProvider,
-      conn.maxTokensOverride,
-    );
+    const provider = useLocalSidecar
+      ? getLocalSidecarProvider()
+      : (() => {
+          const resolvedConn = conn!;
+          // Use dedicated embedding base URL if configured, otherwise the connection's base URL
+          const embedBaseUrl = resolvedConn.embeddingBaseUrl
+            ? (resolvedConn.embeddingBaseUrl as string).replace(/\/+$/, "")
+            : (resolvedConn.baseUrl as string);
+          return createLLMProvider(
+            resolvedConn.provider as string,
+            embedBaseUrl,
+            resolvedConn.apiKey as string,
+            resolvedConn.maxContext,
+            resolvedConn.openrouterProvider,
+            resolvedConn.maxTokensOverride,
+          );
+        })();
+    const embeddingModel = useLocalSidecar ? LOCAL_SIDECAR_MODEL : body.model;
 
     // Build text for each entry: combine name, keys, and content
     const texts = (entries as Array<Record<string, unknown>>).map((e) => {
@@ -791,7 +802,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
       const batchTexts = texts.slice(i, i + BATCH_SIZE);
       const batchEntries = entries.slice(i, i + BATCH_SIZE);
-      const embeddings = await provider.embed(batchTexts, body.model);
+      const embeddings = await provider.embed(batchTexts, embeddingModel);
       for (let j = 0; j < batchEntries.length; j++) {
         const entry = batchEntries[j] as Record<string, unknown>;
         if (embeddings[j]) {

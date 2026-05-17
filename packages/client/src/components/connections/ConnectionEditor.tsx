@@ -56,6 +56,7 @@ import {
 } from "../ui/GenerationParametersEditor";
 import {
   PROVIDERS,
+  LOCAL_SIDECAR_CONNECTION_ID,
   MODEL_LISTS,
   IMAGE_GENERATION_SOURCES,
   inferImageSource,
@@ -1824,6 +1825,9 @@ export function ConnectionEditor() {
                   className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                 >
                   <option value="">Same as this connection</option>
+                  {import.meta.env.VITE_MARINARA_LITE !== "true" && (
+                    <option value={LOCAL_SIDECAR_CONNECTION_ID}>Local Model (sidecar)</option>
+                  )}
                   {((allConnections ?? []) as Record<string, unknown>[])
                     .filter((c) => c.id !== connectionDetailId && c.provider !== "image_generation")
                     .map((c) => (
@@ -1834,8 +1838,9 @@ export function ConnectionEditor() {
                     ))}
                 </select>
                 <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                  Use a different connection&apos;s API key and base URL for embeddings. The embedding model name above
-                  will still be used unless the chosen connection has its own embedding model configured.
+                  {localEmbeddingConnectionId === LOCAL_SIDECAR_CONNECTION_ID
+                    ? "Uses the built-in Local Model from the Connections panel. The sidecar starts on demand and uses the currently selected local model for embeddings."
+                    : "Use a different connection's API key and base URL for embeddings. The embedding model name above will still be used unless the chosen connection has its own embedding model configured."}
                 </p>
               </div>
             </FieldGroup>
