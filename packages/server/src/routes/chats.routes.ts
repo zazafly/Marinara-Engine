@@ -50,8 +50,10 @@ import { DATA_DIR } from "../utils/data-dir.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import {
   findLastIndex,
+  isManualTrackerCharacterId,
   parseExtra,
   isMessageHiddenFromAI,
+  resolveActiveCharacterIds,
   resolveVisibleGameStateAnchor,
   shouldEnableAgentsForGeneration,
 } from "./generate/generate-route-utils.js";
@@ -378,8 +380,11 @@ export async function chatsRoutes(app: FastifyInstance) {
       if (currentExtensions.conversationStatus === "online" && currentExtensions.conversationActivity == null) {
         continue;
       }
-      const extensions: Record<string, unknown> = { ...currentExtensions, conversationStatus: "online" };
-      delete extensions.conversationActivity;
+      const extensions: Record<string, unknown> = {
+        ...currentExtensions,
+        conversationStatus: "online",
+        conversationActivity: undefined,
+      };
       await characterStorage.update(characterId, { extensions } as Partial<CharacterData>, undefined, {
         skipVersionSnapshot: true,
       });
@@ -468,6 +473,24 @@ export async function chatsRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "Invalid Discord webhook URL" });
       }
       incoming.discordWebhookUrl = url;
+    }
+    if (incoming.inactiveCharacterIds !== undefined) {
+      if (
+        !Array.isArray(incoming.inactiveCharacterIds) ||
+        !incoming.inactiveCharacterIds.every((id) => typeof id === "string")
+      ) {
+        return reply.status(400).send({ error: "inactiveCharacterIds must be an array of strings" });
+      }
+      const characterIds: string[] =
+        typeof chat.characterIds === "string"
+          ? JSON.parse(chat.characterIds)
+          : Array.isArray(chat.characterIds)
+            ? chat.characterIds
+            : [];
+      const validIds = new Set(characterIds);
+      incoming.inactiveCharacterIds = Array.from(
+        new Set((incoming.inactiveCharacterIds as string[]).filter((id) => validIds.has(id))),
+      );
     }
     if (incoming.conversationSchedulesEnabled === false) {
       await clearConversationScheduleState(chat);
@@ -1137,7 +1160,9 @@ export async function chatsRoutes(app: FastifyInstance) {
 
     // ── Enrich present characters with avatar paths ──
     // Match NPC names against the chat's known character cards, then fall back to stored NPC avatars on disk.
-    const charsNeedingAvatar = presentCharacters.filter((c) => !c.avatarPath && c.name);
+    const charsNeedingAvatar = presentCharacters.filter(
+      (c) => !c.avatarPath && c.name && !isManualTrackerCharacterId(c.characterId),
+    );
     if (charsNeedingAvatar.length > 0) {
       const chat = await storage.getById(req.params.id);
       const chatCharIds: string[] = (() => {
@@ -1410,13 +1435,17 @@ export async function chatsRoutes(app: FastifyInstance) {
             presetStore.listChoiceBlocksForPreset(presetId),
           ]);
 
-          const characterIds: string[] = (() => {
+          const allCharacterIds: string[] = (() => {
             try {
               return JSON.parse(chat.characterIds as string);
             } catch {
               return [];
             }
           })();
+          const characterIds = resolveActiveCharacterIds(allCharacterIds, chatMeta, {
+            mode: (chat.mode as string) ?? "roleplay",
+            allowEmpty: true,
+          });
 
           let personaName = "User";
           let personaId: string | null = null;

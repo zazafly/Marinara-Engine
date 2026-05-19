@@ -18,6 +18,11 @@ type FontSize = 12 | 14 | 16 | 17 | 19 | 22;
 export type VisualTheme = "default" | "sillytavern";
 export type HudPosition = "top" | "left" | "right";
 export type TrackerPanelSide = "left" | "right";
+export type TrackerThoughtBubbleDisplay = "inline" | "floating";
+export const TRACKER_TEMPERATURE_UNITS = ["celsius", "fahrenheit"] as const;
+export type TrackerTemperatureUnit = (typeof TRACKER_TEMPERATURE_UNITS)[number];
+export const TRACKER_PANEL_SIZE_PROFILES = ["compact", "standard", "expanded"] as const;
+export type TrackerPanelSizeProfile = (typeof TRACKER_PANEL_SIZE_PROFILES)[number];
 export type TrackerDataPanelSection = "world" | "persona" | "characters" | "quests" | "custom";
 export type TrackerPanelCollapsedSections = Partial<Record<TrackerDataPanelSection, boolean>>;
 export type TrackerPanelSectionOrder = TrackerDataPanelSection[];
@@ -58,9 +63,14 @@ export const SIDEBAR_WIDTH_MIN = 240;
 export const SIDEBAR_WIDTH_MAX = 480;
 export const RIGHT_PANEL_WIDTH_MIN = 280;
 export const RIGHT_PANEL_WIDTH_MAX = 520;
-export const TRACKER_PANEL_WIDTH_DEFAULT = 288;
-export const TRACKER_PANEL_WIDTH_MIN = 220;
-export const TRACKER_PANEL_WIDTH_MAX = 440;
+export const TRACKER_PANEL_SIZE_PROFILE_WIDTHS: Record<TrackerPanelSizeProfile, number> = {
+  compact: 280,
+  standard: 340,
+  expanded: 420,
+};
+export const TRACKER_PANEL_WIDTH_DEFAULT = TRACKER_PANEL_SIZE_PROFILE_WIDTHS.standard;
+export const TRACKER_PANEL_WIDTH_MIN = TRACKER_PANEL_SIZE_PROFILE_WIDTHS.compact;
+export const TRACKER_PANEL_WIDTH_MAX = TRACKER_PANEL_SIZE_PROFILE_WIDTHS.expanded;
 const IMAGE_DIMENSION_MIN = 64;
 const IMAGE_DIMENSION_MAX = 4096;
 const GAME_SETUP_LEARNED_LIMIT = 60;
@@ -107,6 +117,24 @@ function clampTrackerPanelWidth(value: unknown) {
   return Math.max(TRACKER_PANEL_WIDTH_MIN, Math.min(TRACKER_PANEL_WIDTH_MAX, width));
 }
 
+export function getTrackerPanelWidthForProfile(profile: TrackerPanelSizeProfile) {
+  return TRACKER_PANEL_SIZE_PROFILE_WIDTHS[profile] ?? TRACKER_PANEL_SIZE_PROFILE_WIDTHS.standard;
+}
+
+export function normalizeTrackerPanelSizeProfile(value: unknown, legacyWidth?: unknown): TrackerPanelSizeProfile {
+  if (TRACKER_PANEL_SIZE_PROFILES.includes(value as TrackerPanelSizeProfile)) {
+    return value as TrackerPanelSizeProfile;
+  }
+
+  const width = typeof legacyWidth === "number" && Number.isFinite(legacyWidth) ? clampTrackerPanelWidth(legacyWidth) : null;
+  if (width !== null) {
+    if (width <= 300) return "compact";
+    if (width >= 380) return "expanded";
+  }
+
+  return "standard";
+}
+
 function normalizeTrackerPanelCollapsedSections(value: unknown): TrackerPanelCollapsedSections {
   const raw = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   const collapsed: TrackerPanelCollapsedSections = {};
@@ -148,6 +176,16 @@ function normalizeSummaryPopoverSettings(value: unknown): SummaryPopoverSettings
     hideSummarisedMessages: raw.hideSummarisedMessages === true,
     collapseHiddenMessages: raw.collapseHiddenMessages === true,
   };
+}
+
+export function normalizeTrackerThoughtBubbleDisplay(value: unknown): TrackerThoughtBubbleDisplay {
+  return value === "inline" || value === "floating" ? value : "inline";
+}
+
+export function normalizeTrackerTemperatureUnit(value: unknown): TrackerTemperatureUnit {
+  return TRACKER_TEMPERATURE_UNITS.includes(value as TrackerTemperatureUnit)
+    ? (value as TrackerTemperatureUnit)
+    : "celsius";
 }
 
 function normalizeLearnedGameSetupOption(value: unknown) {
@@ -217,7 +255,10 @@ interface UIState {
   trackerPanelSide: TrackerPanelSide;
   trackerPanelHideHudWidgets: boolean;
   trackerPanelUseExpressionSprites: boolean;
-  trackerPanelWidth: number;
+  trackerPanelThoughtBubbleDisplay: TrackerThoughtBubbleDisplay;
+  trackerPanelDockedThoughtsAlwaysVisible: boolean;
+  trackerPanelSizeProfile: TrackerPanelSizeProfile;
+  trackerTemperatureUnit: TrackerTemperatureUnit;
   trackerPanelCollapsedSections: TrackerPanelCollapsedSections;
   trackerPanelSectionOrder: TrackerPanelSectionOrder;
   settingsTab: string;
@@ -250,6 +291,8 @@ interface UIState {
   characterLibraryOpen: boolean;
   /** True when any open detail editor has unsaved changes */
   editorDirty: boolean;
+  /** Mobile-only return target for detail editors opened from a right panel */
+  detailReturnRightPanel: Panel | null;
 
   // ── Settings (persisted) ──
   fontSize: FontSize;
@@ -442,7 +485,10 @@ interface UIState {
   setTrackerPanelSide: (side: TrackerPanelSide) => void;
   setTrackerPanelHideHudWidgets: (hidden: boolean) => void;
   setTrackerPanelUseExpressionSprites: (enabled: boolean) => void;
-  setTrackerPanelWidth: (width: number) => void;
+  setTrackerPanelThoughtBubbleDisplay: (display: TrackerThoughtBubbleDisplay) => void;
+  setTrackerPanelDockedThoughtsAlwaysVisible: (visible: boolean) => void;
+  setTrackerPanelSizeProfile: (profile: TrackerPanelSizeProfile) => void;
+  setTrackerTemperatureUnit: (unit: TrackerTemperatureUnit) => void;
   setTrackerPanelSectionOrder: (order: TrackerPanelSectionOrder) => void;
   setTrackerPanelSectionCollapsed: (section: TrackerDataPanelSection, collapsed: boolean) => void;
   toggleTrackerPanelSectionCollapsed: (section: TrackerDataPanelSection) => void;
@@ -583,6 +629,21 @@ interface UIState {
   setUserActivity: (activity: string) => void;
 }
 
+function getMobileDetailReturnState(state: UIState) {
+  const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+  return {
+    detailReturnRightPanel: isMobile && state.rightPanelOpen ? state.rightPanel : null,
+    ...(isMobile && { rightPanelOpen: false }),
+  };
+}
+
+function restoreMobileDetailReturnPanel(panel: Panel | null) {
+  return {
+    detailReturnRightPanel: null,
+    ...(panel && { rightPanelOpen: true, rightPanel: panel }),
+  };
+}
+
 /**
  * Returns the subset of UI state that is synced to the server so it persists
  * across devices and browsers. Excludes legacy migration flags, auto-computed
@@ -598,7 +659,10 @@ export function pickSyncedSettings(state: UIState) {
     trackerPanelSide: state.trackerPanelSide,
     trackerPanelHideHudWidgets: state.trackerPanelHideHudWidgets,
     trackerPanelUseExpressionSprites: state.trackerPanelUseExpressionSprites,
-    trackerPanelWidth: state.trackerPanelWidth,
+    trackerPanelThoughtBubbleDisplay: state.trackerPanelThoughtBubbleDisplay,
+    trackerPanelDockedThoughtsAlwaysVisible: state.trackerPanelDockedThoughtsAlwaysVisible,
+    trackerPanelSizeProfile: state.trackerPanelSizeProfile,
+    trackerTemperatureUnit: state.trackerTemperatureUnit,
     trackerPanelCollapsedSections: state.trackerPanelCollapsedSections,
     trackerPanelSectionOrder: state.trackerPanelSectionOrder,
     theme: state.theme,
@@ -699,7 +763,10 @@ export const useUIStore = create<UIState>()(
       trackerPanelSide: "right" as TrackerPanelSide,
       trackerPanelHideHudWidgets: false,
       trackerPanelUseExpressionSprites: false,
-      trackerPanelWidth: TRACKER_PANEL_WIDTH_DEFAULT,
+      trackerPanelThoughtBubbleDisplay: "inline" as TrackerThoughtBubbleDisplay,
+      trackerPanelDockedThoughtsAlwaysVisible: false,
+      trackerPanelSizeProfile: "standard" as TrackerPanelSizeProfile,
+      trackerTemperatureUnit: "celsius" as TrackerTemperatureUnit,
       trackerPanelCollapsedSections: {},
       trackerPanelSectionOrder: [...TRACKER_DATA_PANEL_SECTIONS],
       settingsTab: "general",
@@ -719,6 +786,7 @@ export const useUIStore = create<UIState>()(
       gameAssetsBrowserOpen: false,
       characterLibraryOpen: false,
       editorDirty: false,
+      detailReturnRightPanel: null,
 
       // Settings defaults
       fontSize: 17 as FontSize,
@@ -836,7 +904,14 @@ export const useUIStore = create<UIState>()(
       setTrackerPanelSide: (side) => set({ trackerPanelSide: side }),
       setTrackerPanelHideHudWidgets: (hidden) => set({ trackerPanelHideHudWidgets: hidden }),
       setTrackerPanelUseExpressionSprites: (enabled) => set({ trackerPanelUseExpressionSprites: enabled }),
-      setTrackerPanelWidth: (width) => set({ trackerPanelWidth: clampTrackerPanelWidth(width) }),
+      setTrackerPanelThoughtBubbleDisplay: (display) =>
+        set({ trackerPanelThoughtBubbleDisplay: normalizeTrackerThoughtBubbleDisplay(display) }),
+      setTrackerPanelDockedThoughtsAlwaysVisible: (visible) =>
+        set({ trackerPanelDockedThoughtsAlwaysVisible: visible }),
+      setTrackerPanelSizeProfile: (profile) =>
+        set({ trackerPanelSizeProfile: normalizeTrackerPanelSizeProfile(profile) }),
+      setTrackerTemperatureUnit: (unit) =>
+        set({ trackerTemperatureUnit: normalizeTrackerTemperatureUnit(unit) }),
       setTrackerPanelSectionOrder: (order) =>
         set({ trackerPanelSectionOrder: normalizeTrackerPanelSectionOrder(order) }),
       setTrackerPanelSectionCollapsed: (section, collapsed) =>
@@ -876,7 +951,7 @@ export const useUIStore = create<UIState>()(
       setChatBackground: (url) => set({ chatBackground: url }),
       setChatBackgroundBlur: (v) => set({ chatBackgroundBlur: Math.max(0, Math.min(24, Math.round(v))) }),
       openCharacterDetail: (id) =>
-        set({
+        set((s) => ({
           characterDetailId: id,
           lorebookDetailId: null,
           presetDetailId: null,
@@ -884,11 +959,16 @@ export const useUIStore = create<UIState>()(
           agentDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeCharacterDetail: () => set({ characterDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeCharacterDetail: () =>
+        set((s) => ({
+          characterDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openLorebookDetail: (id) =>
-        set({
+        set((s) => ({
           lorebookDetailId: id,
           characterLibraryOpen: false,
           characterDetailId: null,
@@ -897,11 +977,16 @@ export const useUIStore = create<UIState>()(
           agentDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeLorebookDetail: () => set({ lorebookDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeLorebookDetail: () =>
+        set((s) => ({
+          lorebookDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openPresetDetail: (id) =>
-        set({
+        set((s) => ({
           presetDetailId: id,
           characterLibraryOpen: false,
           characterDetailId: null,
@@ -910,11 +995,16 @@ export const useUIStore = create<UIState>()(
           agentDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closePresetDetail: () => set({ presetDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closePresetDetail: () =>
+        set((s) => ({
+          presetDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openConnectionDetail: (id) =>
-        set({
+        set((s) => ({
           connectionDetailId: id,
           characterLibraryOpen: false,
           characterDetailId: null,
@@ -923,11 +1013,16 @@ export const useUIStore = create<UIState>()(
           agentDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeConnectionDetail: () => set({ connectionDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeConnectionDetail: () =>
+        set((s) => ({
+          connectionDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openAgentDetail: (agentType) =>
-        set({
+        set((s) => ({
           agentDetailId: agentType,
           characterLibraryOpen: false,
           characterDetailId: null,
@@ -937,11 +1032,16 @@ export const useUIStore = create<UIState>()(
           toolDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeAgentDetail: () => set({ agentDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeAgentDetail: () =>
+        set((s) => ({
+          agentDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openToolDetail: (id) =>
-        set({
+        set((s) => ({
           toolDetailId: id,
           agentDetailId: null,
           characterLibraryOpen: false,
@@ -951,11 +1051,16 @@ export const useUIStore = create<UIState>()(
           connectionDetailId: null,
           personaDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeToolDetail: () => set({ toolDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeToolDetail: () =>
+        set((s) => ({
+          toolDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openPersonaDetail: (id) =>
-        set({
+        set((s) => ({
           personaDetailId: id,
           characterLibraryOpen: false,
           characterDetailId: null,
@@ -965,11 +1070,16 @@ export const useUIStore = create<UIState>()(
           agentDetailId: null,
           toolDetailId: null,
           regexDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closePersonaDetail: () => set({ personaDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closePersonaDetail: () =>
+        set((s) => ({
+          personaDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openRegexDetail: (id) =>
-        set({
+        set((s) => ({
           regexDetailId: id,
           personaDetailId: null,
           characterLibraryOpen: false,
@@ -979,9 +1089,14 @@ export const useUIStore = create<UIState>()(
           connectionDetailId: null,
           agentDetailId: null,
           toolDetailId: null,
-          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
-        }),
-      closeRegexDetail: () => set({ regexDetailId: null, editorDirty: false }),
+          ...getMobileDetailReturnState(s),
+        })),
+      closeRegexDetail: () =>
+        set((s) => ({
+          regexDetailId: null,
+          editorDirty: false,
+          ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
+        })),
       openCharacterLibrary: () =>
         set({
           characterLibraryOpen: true,
@@ -995,6 +1110,7 @@ export const useUIStore = create<UIState>()(
           regexDetailId: null,
           botBrowserOpen: false,
           editorDirty: false,
+          detailReturnRightPanel: null,
           rightPanelOpen: false,
         }),
       closeCharacterLibrary: () => set({ characterLibraryOpen: false }),
@@ -1003,6 +1119,7 @@ export const useUIStore = create<UIState>()(
           botBrowserOpen: true,
           gameAssetsBrowserOpen: false,
           characterLibraryOpen: false,
+          detailReturnRightPanel: null,
           regexDetailId: null,
           personaDetailId: null,
           characterDetailId: null,
@@ -1019,6 +1136,7 @@ export const useUIStore = create<UIState>()(
           gameAssetsBrowserOpen: true,
           botBrowserOpen: false,
           characterLibraryOpen: false,
+          detailReturnRightPanel: null,
           regexDetailId: null,
           personaDetailId: null,
           characterDetailId: null,
@@ -1061,6 +1179,7 @@ export const useUIStore = create<UIState>()(
           botBrowserOpen: false,
           gameAssetsBrowserOpen: false,
           editorDirty: false,
+          detailReturnRightPanel: null,
         }),
       setEditorDirty: (dirty) => set({ editorDirty: dirty }),
 
@@ -1229,7 +1348,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 32,
+      version: 36,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1508,6 +1627,39 @@ export const useUIStore = create<UIState>()(
         if (version <= 31 && persisted.chatBackgroundBlur === undefined) {
           persisted.chatBackgroundBlur = 0;
         }
+        // v32 -> v33: make tracker character thought placement an explicit user preference.
+        if (version <= 32) {
+          persisted.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
+            persisted.trackerPanelThoughtBubbleDisplay,
+          );
+        }
+        persisted.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
+          persisted.trackerPanelThoughtBubbleDisplay,
+        );
+        // v33 -> v34: replace arbitrary tracker desktop widths with curated size profiles.
+        if (version <= 33) {
+          persisted.trackerPanelSizeProfile = normalizeTrackerPanelSizeProfile(
+            persisted.trackerPanelSizeProfile,
+            persisted.trackerPanelWidth,
+          );
+        }
+        persisted.trackerPanelSizeProfile = normalizeTrackerPanelSizeProfile(
+          persisted.trackerPanelSizeProfile,
+          persisted.trackerPanelWidth,
+        );
+        // v34 -> v35: tracker-only temperature display unit.
+        if (version <= 34) {
+          persisted.trackerTemperatureUnit = normalizeTrackerTemperatureUnit(persisted.trackerTemperatureUnit);
+        }
+        persisted.trackerTemperatureUnit = normalizeTrackerTemperatureUnit(persisted.trackerTemperatureUnit);
+        // v35 -> v36: optional always-visible docked tracker thoughts.
+        if (version <= 35 && persisted.trackerPanelDockedThoughtsAlwaysVisible === undefined) {
+          persisted.trackerPanelDockedThoughtsAlwaysVisible = false;
+        }
+        if (persisted.trackerPanelDockedThoughtsAlwaysVisible === undefined) {
+          persisted.trackerPanelDockedThoughtsAlwaysVisible = false;
+        }
+        delete persisted.trackerPanelWidth;
         return persisted;
       },
       partialize: (state) => ({
@@ -1519,7 +1671,10 @@ export const useUIStore = create<UIState>()(
         trackerPanelSide: state.trackerPanelSide,
         trackerPanelHideHudWidgets: state.trackerPanelHideHudWidgets,
         trackerPanelUseExpressionSprites: state.trackerPanelUseExpressionSprites,
-        trackerPanelWidth: state.trackerPanelWidth,
+        trackerPanelThoughtBubbleDisplay: state.trackerPanelThoughtBubbleDisplay,
+        trackerPanelDockedThoughtsAlwaysVisible: state.trackerPanelDockedThoughtsAlwaysVisible,
+        trackerPanelSizeProfile: state.trackerPanelSizeProfile,
+        trackerTemperatureUnit: state.trackerTemperatureUnit,
         trackerPanelCollapsedSections: state.trackerPanelCollapsedSections,
         trackerPanelSectionOrder: state.trackerPanelSectionOrder,
         theme: state.theme,

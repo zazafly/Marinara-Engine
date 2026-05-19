@@ -198,6 +198,22 @@ export function appendGenerationTailMessages(
   };
 }
 
+export function resolveActiveCharacterIds(
+  characterIds: string[],
+  metadata: Record<string, unknown>,
+  options: { mode?: string; allowEmpty?: boolean } = {},
+): string[] {
+  if (options.mode === "game") return characterIds;
+
+  const inactiveIds = Array.isArray(metadata.inactiveCharacterIds)
+    ? new Set(metadata.inactiveCharacterIds.filter((id): id is string => typeof id === "string"))
+    : new Set<string>();
+  const activeIds = characterIds.filter((id) => !inactiveIds.has(id));
+
+  if (activeIds.length > 0 || options.allowEmpty) return activeIds;
+  return characterIds;
+}
+
 export function shouldPreferLatestVisibleGameState(input: {
   attachments?: unknown[] | null;
   impersonate?: boolean;
@@ -495,6 +511,10 @@ function trackerCharacterKey(character: Record<string, unknown>) {
   return id || name || null;
 }
 
+export function isManualTrackerCharacterId(value: unknown): boolean {
+  return typeof value === "string" && value.trim().startsWith("manual-");
+}
+
 export function preserveTrackerCharacterUiFields(
   nextCharacters: Array<Record<string, unknown>>,
   previousCharacters: Array<Record<string, unknown>>,
@@ -510,19 +530,27 @@ export function preserveTrackerCharacterUiFields(
     const previous = key ? previousByKey.get(key) : null;
     const previousPortraitFocusX = previous?.portraitFocusX;
     const previousPortraitFocusY = previous?.portraitFocusY;
+    const previousPortraitZoom = previous?.portraitZoom;
     if (
-      typeof character.portraitFocusX !== "number" &&
+      (typeof character.portraitFocusX !== "number" || !Number.isFinite(character.portraitFocusX)) &&
       typeof previousPortraitFocusX === "number" &&
       Number.isFinite(previousPortraitFocusX)
     ) {
       character.portraitFocusX = previousPortraitFocusX;
     }
     if (
-      typeof character.portraitFocusY !== "number" &&
+      (typeof character.portraitFocusY !== "number" || !Number.isFinite(character.portraitFocusY)) &&
       typeof previousPortraitFocusY === "number" &&
       Number.isFinite(previousPortraitFocusY)
     ) {
       character.portraitFocusY = previousPortraitFocusY;
+    }
+    if (
+      (typeof character.portraitZoom !== "number" || !Number.isFinite(character.portraitZoom)) &&
+      typeof previousPortraitZoom === "number" &&
+      Number.isFinite(previousPortraitZoom)
+    ) {
+      character.portraitZoom = previousPortraitZoom;
     }
   }
 }

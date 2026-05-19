@@ -186,6 +186,10 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
     let outputTokens = 0;
     let cachedTokens = 0;
     let cacheWriteTokens = 0;
+    let emittedText = false;
+    let sawSuccessResult = false;
+    let finalFastModeState: string | null = null;
+    let finalUsedModels: string[] = [];
 
     try {
       const queryHandle = query({ prompt, options: sdkOptions });
@@ -199,6 +203,7 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
           if (event.type === "content_block_delta" && event.delta) {
             if (event.delta.type === "text_delta" && event.delta.text) {
               yield event.delta.text;
+              emittedText = true;
             } else if (event.delta.type === "thinking_delta" && event.delta.thinking && options.onThinking) {
               options.onThinking(event.delta.thinking);
             }
@@ -210,12 +215,14 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
           for (const block of blocks) {
             if (block.type === "text" && block.text) {
               yield block.text;
+              emittedText = true;
             } else if (block.type === "thinking" && block.thinking && options.onThinking) {
               options.onThinking(block.thinking);
             }
           }
         } else if (message.type === "result") {
           if (message.subtype === "success") {
+            sawSuccessResult = true;
             const usage = message.usage ?? null;
             if (usage) {
               inputTokens = usage.input_tokens ?? 0;
@@ -230,6 +237,8 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
             // worth surfacing.
             const usedModels = Object.keys(message.modelUsage ?? {});
             const fastModeState = message.fast_mode_state;
+            finalUsedModels = usedModels;
+            finalFastModeState = fastModeState ?? null;
             const billedDifferent = usedModels.length > 0 && !usedModels.includes(options.model);
             if (billedDifferent) {
               logger.warn(
@@ -245,6 +254,11 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
                 options.model,
               );
             }
+            const finalResult = typeof message.result === "string" ? message.result : "";
+            if (!emittedText && finalResult.trim()) {
+              yield finalResult;
+              emittedText = true;
+            }
           } else {
             const detail = message.errors?.length ? ` — ${message.errors.join("; ")}` : "";
             throw new Error(`Claude (Subscription) request failed (${message.subtype})${detail}`);
@@ -257,6 +271,22 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       throw new Error(`Claude (Subscription) request failed: ${friendly}`);
     } finally {
       if (options.signal) options.signal.removeEventListener("abort", onUpstreamAbort);
+    }
+
+    if (!emittedText) {
+      const diagnostic = [
+        `model=${options.model}`,
+        `successResult=${sawSuccessResult}`,
+        `inputTokens=${inputTokens}`,
+        `outputTokens=${outputTokens}`,
+        `fast_mode_state=${finalFastModeState ?? "unknown"}`,
+        `billedModels=${finalUsedModels.length ? finalUsedModels.join(",") : "none"}`,
+        `HOME=${process.env.HOME ?? "unset"}`,
+      ].join(", ");
+      logger.warn("[claude-subscription] SDK completed without usable text (%s)", diagnostic);
+      throw new Error(
+        `Claude (Subscription) returned no content. Check that \`claude login\` was run for the same HOME/user as the Marinara server, then retry with LOG_LEVEL=debug if needed (${diagnostic}).`,
+      );
     }
 
     if (inputTokens || outputTokens) {

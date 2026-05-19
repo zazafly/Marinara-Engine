@@ -138,7 +138,6 @@ import { eq } from "drizzle-orm";
 import { PROFESSOR_MARI_ID } from "@marinara-engine/shared";
 import { chunkAndEmbedMessages, embedMemoryRecallTexts, recallMemories } from "../services/memory-recall.js";
 import { resolveMemoryRecallEmbeddingSource } from "../services/memory-recall-embedding.js";
-import { warmLorebookEntryEmbeddings } from "../services/lorebook/embeddings.js";
 import { postToDiscordWebhook } from "../services/discord-webhook.js";
 import {
   appendGenerationTailMessages,
@@ -149,12 +148,14 @@ import {
   buildUserMessageRegenerationSourceMessage,
   extractImageAttachmentDataUrls,
   injectIntoOutputFormatOrLastUser,
+  isManualTrackerCharacterId,
   isMessageHiddenFromAI,
   mergeCustomParameters,
   parseExtra,
   parseStoredGenerationParameters,
   parseGameStateRow,
   preserveTrackerCharacterUiFields,
+  resolveActiveCharacterIds,
   resolveBaseUrl,
   resolveRegenerationGameStateFallbackMessageIds,
   resolveRegenerationGameStateAnchor,
@@ -202,6 +203,7 @@ import {
   buildGenerationPromptPresetCandidates,
   type PromptPresetCandidateSource,
 } from "./generate/prompt-preset-selection.js";
+import { resolveSpotifyToolAvailabilityRequest } from "./generate/spotify-tool-availability.js";
 import {
   applyGenerationReplayToRegenerateInput,
   buildGenerationReplay,
@@ -1220,7 +1222,14 @@ export async function generateRoutes(app: FastifyInstance) {
         msg.content = msg.content.replace(/\n([ \t]*\n){2,}/g, "\n\n");
       }
 
-      const characterIds: string[] = JSON.parse(chat.characterIds as string);
+      const allCharacterIds: string[] = JSON.parse(chat.characterIds as string);
+      const characterIds = resolveActiveCharacterIds(allCharacterIds, chatMeta, {
+        mode: chatMode,
+        allowEmpty: true,
+      });
+      if (allCharacterIds.length > 0 && characterIds.length === 0 && chatMode !== "game") {
+        throw new Error("All characters in this chat are disabled. Enable at least one character before generating.");
+      }
 
       // Resolve persona — prefer per-chat personaId, fall back to globally active persona
       // (Game mode skips the fallback — persona must be explicitly selected in the setup wizard)
@@ -1526,12 +1535,10 @@ export async function generateRoutes(app: FastifyInstance) {
             excludedLorebookIds: gameLorebookScopeExclusions.excludedLorebookIds,
             excludedSourceAgentIds: gameLorebookScopeExclusions.excludedSourceAgentIds,
           })) as LorebookEntry[];
-          await warmLorebookEntryEmbeddings(app.db, activeEntries, {
-            embeddingSource: memoryRecallEmbeddingSource,
-            batchSize: 32,
-          });
-          const hasEmbeddableEntries = activeEntries.length > 0;
-          if (hasEmbeddableEntries) {
+          const hasVectorizedEntries = activeEntries.some(
+            (entry) => Array.isArray(entry.embedding) && entry.embedding.length > 0,
+          );
+          if (hasVectorizedEntries) {
             const recentMsgs = currentInputMessages()
               .slice(-10)
               .map((m) => m.content)
@@ -5012,12 +5019,13 @@ export async function generateRoutes(app: FastifyInstance) {
           scriptBody: string | null;
         }> = [];
 
+        // Per-chat tool selection (empty = all non-agent-only tools, with Spotify gated below)
+        const chatActiveToolIds: string[] = Array.isArray(chatMeta.activeToolIds)
+          ? (chatMeta.activeToolIds as string[])
+          : [];
+        const hasToolFilter = chatActiveToolIds.length > 0;
+
         if (resolveTools) {
-          // Per-chat tool selection (empty = all tools)
-          const chatActiveToolIds: string[] = Array.isArray(chatMeta.activeToolIds)
-            ? (chatMeta.activeToolIds as string[])
-            : [];
-          const hasToolFilter = chatActiveToolIds.length > 0;
           const registeredToolSources = new Map<string, "built-in" | "custom">();
 
           // Built-in tools
@@ -5126,16 +5134,21 @@ export async function generateRoutes(app: FastifyInstance) {
         const resolvedToolNames = new Set(allToolDefs.map((td) => td.function.name));
         const chatResolvedToolNames = new Set((toolDefs ?? []).map((td) => td.function.name));
         const spotifyToolNames = new Set(DEFAULT_AGENT_TOOLS.spotify ?? []);
-        const chatAllowsSpotify = Array.from(chatResolvedToolNames).some((name) => spotifyToolNames.has(name));
-        const anyAgentAllowsSpotify = resolvedAgents.some((agent) => {
+        const agentResolvedSpotifyToolGroups = resolvedAgents.map((agent) => {
           const agentSettings = typeof agent.settings === "string" ? JSON.parse(agent.settings) : agent.settings || {};
           const agentEnabledNames = Array.isArray(agentSettings.enabledTools)
             ? (agentSettings.enabledTools as string[])
             : [];
-          const agentResolvedNames = agentEnabledNames.filter((name) => resolvedToolNames.has(name));
-          return agentResolvedNames.some((name) => spotifyToolNames.has(name));
+          return agentEnabledNames.filter((name) => resolvedToolNames.has(name));
         });
-        const needsSpotify = (enableChatTools && chatAllowsSpotify) || anyAgentAllowsSpotify;
+        const spotifyAvailabilityRequest = resolveSpotifyToolAvailabilityRequest({
+          enableChatTools,
+          hasChatToolFilter: hasToolFilter,
+          chatResolvedToolNames,
+          agentResolvedToolNameGroups: agentResolvedSpotifyToolGroups,
+          spotifyToolNames,
+        });
+        const needsSpotify = spotifyAvailabilityRequest.needsSpotifyCredentials;
         const spotifyAgentId =
           resolvedAgents.find((agent) => agent.type === "spotify" && !agent.id.startsWith("builtin:"))?.id ??
           enabledConfigs.find((cfg: any) => cfg.type === "spotify")?.id ??
@@ -5158,7 +5171,7 @@ export async function generateRoutes(app: FastifyInstance) {
         if (!spotifyToolsAvailable && toolDefs) {
           const beforeCount = toolDefs.length;
           toolDefs = toolDefs.filter((td) => !spotifyToolNames.has(td.function.name));
-          if (beforeCount !== toolDefs.length) {
+          if (beforeCount !== toolDefs.length && spotifyAvailabilityRequest.shouldLogUnavailableToolOmission) {
             logger.debug("[spotify] Omitted unavailable Spotify tools from main generation");
           }
         }
@@ -7827,6 +7840,7 @@ export async function generateRoutes(app: FastifyInstance) {
 
                 for (const char of chars) {
                   if (char.avatarPath) continue; // already set
+                  if (isManualTrackerCharacterId(char.characterId)) continue;
                   const name = (char.name as string) ?? "";
                   // Try matching against the chat's character cards (case-insensitive)
                   const matched = charInfo.find((c) => c.name.toLowerCase() === name.toLowerCase());
@@ -7862,7 +7876,11 @@ export async function generateRoutes(app: FastifyInstance) {
                 const npcImgConnId = (charTrackerAgent?.settings?.imageConnectionId as string) ?? null;
                 if (autoGenAvatars && npcImgConnId) {
                   const charsNeedingAvatars = chars.filter(
-                    (c: any) => !c.avatarPath && (c.name as string) && (c.appearance as string),
+                    (c: any) =>
+                      !c.avatarPath &&
+                      !isManualTrackerCharacterId(c.characterId) &&
+                      (c.name as string) &&
+                      (c.appearance as string),
                   );
                   if (charsNeedingAvatars.length > 0) {
                     // Fire-and-forget: generate avatars in background so we don't block
